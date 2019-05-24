@@ -1,0 +1,10 @@
+name: migration
+title:
+username:
+account: joseshinyapps
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 946852
+bundleId: 2105579
+url: https://joseshinyapps.shinyapps.io/migration/
+when: 1558675959.27313

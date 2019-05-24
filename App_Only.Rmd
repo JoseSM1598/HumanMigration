@@ -1,0 +1,438 @@
+---
+title: ""
+output: html_document
+---
+
+```{r message = FALSE, echo=FALSE}
+if (!"DT" %in% row.names(installed.packages()))
+  install.packages("DT", repos = "https://cran.rstudio.com/")
+library(purrr)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(data.table)
+library(shiny)
+library(httr)
+library(gridExtra)
+library(leaflet)
+library(stringr)
+library(XML)
+library(xml2)
+library(shiny)
+library(magrittr)
+library(rgdal)
+library(maptools)
+library(leaflet)
+library(htmlwidgets)
+library(shinythemes)
+library(DT)
+library(splines)
+
+
+```
+
+
+
+```{r message = FALSE, echo=FALSE, warning = FALSE}
+# First, ensuring that strings aren't automatically read in as factors
+stringsAsFactors = FALSE
+
+# Reading in the csv with countries' centroid coordinates
+coords <- read.csv("https://raw.githubusercontent.com/albertyw/avenews/master/old/data/average-latitude-longitude-countries.csv", stringsAsFactors=FALSE)
+
+# Reading in the csv with refugee data
+data <- read.csv("https://data.humdata.org/dataset/7296b00d-b52c-4ccd-ae85-00d00b2a8f62/resource/fbacbba3-1b20-4331-931b-6a21a4cb80f5/download/psq-tms.csv", skip = 5, stringsAsFactors=FALSE)
+
+# Gathering data by year, setting column names
+data2 <- data %>%
+  gather(Year, n, X2000:X2013) %>%
+  mutate(n = as.integer(n))%>%
+  set_colnames(c("Residence", "Origin", "Type", "Year", "n"))
+
+# Fix format of year
+data2$Year <- as.numeric(str_remove(data2$Year, "X"))
+
+# Adjusting country names in residence column
+data2$Residence <- data2$Residence %>%
+  str_replace_all("Viet Nam", "Vietnam") %>%
+  str_replace_all("Bolivarian Republic of Venezuela", "Venezuela") %>%
+  str_remove_all(" and Montenegro") %>%
+  str_replace_all("Côte", "Cote") %>%
+  str_remove_all(" SAR, China")
+  
+# Adjusting country names in origin column
+data2$Origin <- data2$Origin %>%
+  str_replace_all("Viet Nam", "Vietnam") %>%
+  str_replace_all("Bolivarian Republic of Venezuela", "Venezuela") %>%
+  str_remove_all(" and Montenegro") %>%
+  str_replace_all("Côte", "Cote") %>%
+  str_remove_all(" SAR, China")
+
+# Adding rows for missing countries
+yugo <- c("YU", "Federal Republic of Yugoslavia", as.numeric(42.46), as.numeric(19.27))
+libya <- c("LY", "Libya", as.numeric(26.34), as.numeric(17.23))
+State_of_Pal <- c("SoPS", "State of Palestine", as.numeric(32), as.numeric(35.25))
+Palestinian <- c("PSn", "Palestinian", as.numeric(32), as.numeric(35.25))
+coords <- rbind(coords, yugo, libya, State_of_Pal, Palestinian)
+
+# Cleaning more country names
+coords$Country <- coords$Country %>%
+  str_remove_all("The ") %>%
+  str_replace("Palestinian Territory", "Occupied Palestinian Territory")
+
+# Creating coords dfs
+ORcoords <- coords
+REScoords <- coords
+colnames(ORcoords) <- c("Code", "Origin", "Latitude", "Longitude")
+colnames(REScoords)<- c("Code", "Residence", "Latitude", "Longitude")
+
+# Joining in order to get coordinates for countries in refugee data
+full = data2 %>%
+  left_join(REScoords, by = "Residence") %>%
+  left_join(ORcoords, by = "Origin")
+full$n[is.na(full$n)] = 0
+
+# Making coordinates numeric
+full$Latitude.x = as.numeric(full$Latitude.x)
+full$Longitude.x = as.numeric(full$Longitude.x)
+full$Latitude.y = as.numeric(full$Latitude.y)
+full$Longitude.y = as.numeric(full$Longitude.y)
+
+#Also, for the mapping, we are going to spread out the variable 'Type' into columns, as this will make the process much easier
+full.spread <- full %>%
+  spread(.,Type, n)
+
+#Change ALL NA's to 0
+full.spread[,10:16][is.na(full.spread[,10:16])] = 0
+
+# Create a function for filtering (used later)
+getOrigins <- function(df, res, year){
+  df %>%
+    filter(Residence == res)%>%
+    filter(Year %in% year)%>%
+    .$Origin
+}
+
+```
+
+
+```{r message = FALSE, echo=FALSE}
+
+###HardCode!
+sp_scale_factor = 2
+scale_factor = (2/5) *400
+big_scale_factor =  900000
+LineNames = c("long", "lat")
+groupNames = c("a","a")
+All = "All Countries"
+```
+
+
+```{r message = FALSE, echo=FALSE}
+#UI
+  ui = navbarPage("José San Martin", id = "nav", theme = shinytheme("flatly"),
+  tabPanel("Introduction", 
+            div(class = "outer",
+                titlePanel("Visualizing Refugees Across The Globe"),
+             
+                sidebarLayout(
+                  sidebarPanel(
+                    h4("By José San Martin")
+                    
+                  ),
+                  mainPanel(
+                    h4("Welcome to our app! This app utilizes 'forced displacement' data to create an interactive map visualization on
+                       one tab, a graph that shows refugee trends over time on the next tab, and a filterable table with all of the
+                       data on the final tab. All data is from The Humanitarian Data Exchange's website."),
+                    br(),
+                    h4("It is important to explain a few key variables in the data. Residence refers to where the person currently
+                       lives. Origin refers to country the people came from. The data set also breaks out those represented into
+                       different categories: Asylum Seekers, Internally Displaced, Others of Concern, Refugees, Returned IDP's,
+                       Returned Refugees, and Stateless. Each row of the data groups these forced displacements by a different
+                       combination of Residence, Origin, and Year."),
+                    br(),
+                    h4("What to do with the many refugees all around the world is the subject of global debate. This app strives to
+                       help its users both quantify and visualize the issue to more fully understand its scope and its severity.")
+                  
+                  )
+                ) 
+            )
+           ),
+    
+  tabPanel("Interactive map",
+    div(class="outer",
+
+    
+   tags$head(
+        # Include our custom CSS
+        includeCSS("styles.css")
+      ),
+   
+   
+    leafletOutput("map", width="1500", height="750"),
+   
+   ##Creates that draggable panel
+   absolutePanel(id = "controls", class = "panel panel-default", fixed = TRUE,style = "z-index: 400",
+        draggable = FALSE, top = 125, left = 5, right = "auto", bottom = "auto",
+        width = 330, height = "auto",
+
+        h3("What do you want to see?", style="color:black"),
+        sliderInput('year', "Year", min = min(full.spread$Year), max = max(full.spread$Year), step = 1, value = 2013, sep = ""),
+        selectInput("type", "Refugee Type", names(full.spread)[10:16]),
+        selectInput("res", "Residence", c("all",unique(full.spread$Residence)), selected = "all"),
+        selectInput("origin", "Origin", "")
+     )
+    )
+   ),
+  
+  ##Creates the tab and UI for the graphs
+  tabPanel("Graphical View",
+           div(class = "outer",
+               titlePanel(title=h4("Graphical View of Refugee Trends", align="center")
+                          ),
+               sidebarPanel(
+                 sliderInput("num", "Year:",
+                             min = min(full.spread$Year), max = max(full.spread$Year),step=1,value=c(min(full.spread$Year),max(full.spread$Year)),
+                             sep = ""),
+                 checkboxGroupInput("typeof", label = "Refugee Type", choices = unique(full$Type), selected = unique(full$Type)),
+                 selectInput("origin1", "Origin", c(All, unique(full.spread$Residence)), selected = All),
+                 selectInput("res1", "Residence", c(All, unique(full.spread$Residence)), selected = All),
+                 #selectInput("origin1", "Origin", ""),
+                 actionButton("call","What were the trends?")),
+               mainPanel(
+                 plotOutput("graphs"))
+               )
+           ),
+  
+
+  tabPanel("Data View",
+           div(class = "outer",
+               fluidPage(
+  h2("Refugee Data"),
+  DT::dataTableOutput("mytable")
+)))
+  
+  )
+
+```
+
+```{r message = FALSE, echo=FALSE}
+# Server
+
+server = function(input,output, session) {
+
+  ##Server code for Data table 
+    output$mytable = DT::renderDataTable({full.spread[,-c(4, 5, 6, 7, 8, 9)]}, options = list(scrollX=TRUE, scrollY=400, scrollCollapse=FALSE, autoWidth = TRUE, columnDefs = list(list(width = '200px', targets = c(1,2)))), filter = 'top')
+
+
+###SERVER CODE FOR MAP START
+    
+    #Creating the actual world map
+    output$map <- renderLeaflet({
+      
+      leaflet() %>%
+        addTiles(
+          
+        ) %>%
+        setView(lng = -93.85, lat = 37.45, zoom = 3)
+  })
+    
+  #Since the origin list depends on the residence selection, we need to make it dynamic and therefore include it in the     server side
+    outVars <- reactive({
+      getOrigins(full.spread, input$res, input$year)
+    })
+    
+    #We need to observe the of origin and update the selectInput drop down list based on what we choose for residence
+    observe({
+      updateSelectInput(session, "origin",
+      choices = outVars())
+    })
+    
+    ###########
+    #Code for creating popups when a circle is clicked
+   # First create a function that grabs what we want 
+    showPopup <- function(country, lat, lng, dataUsed) {
+      selectedRow <- dataUsed%>%filter(Residence == country)
+      content <- as.character(tagList(
+        h5(country, style="color:black"),
+        tags$br(),
+        tags$h6("Number of", input$type, ":", selectedRow[[input$type]], style="color:black")
+     ))
+      leafletProxy("map") %>% addPopups(lng, lat, content, layerId = country)
+    }
+    
+    ########
+    
+    observe({
+    #Clear al polygons from the map
+   leafletProxy("map")%>%
+      clearShapes()
+      
+    #Set up our variables
+    typeBy <- input$type
+    residence <- input$res
+    origin <- input$origin
+    year <- input$year
+
+    
+    if (residence != 'all'){
+      
+      dataUsed <- full.spread %>% filter(Residence == residence, Origin == origin, Year == year)
+      #Set up palette and radius
+      colorData <- dataUsed[[typeBy]]
+      pal <- colorBin(palette(),colorData, 5, pretty = TRUE)
+      
+      #Syria and colombia have such a large amount of displaced people that we need a different radius function for them
+      if (residence == "Syrian Arab Republic" || residence == "Colombia"){
+         radius <- dataUsed[,typeBy] / log(dataUsed[,typeBy]) *sp_scale_factor
+      }else{
+        radius <- dataUsed[,typeBy] / (dataUsed[,typeBy])^scale_factor
+      }     
+      
+      #Add the connecting lines betweent the residence and origin country. Used StackOverflow:
+      #https://stackoverflow.com/questions/32275213/how-do-i-connect-two-coordinates-with-a-line-using-leaflet-in-r
+        
+      if(nrow(dataUsed) == 1){
+        p1 = dataUsed[,c(6,5)]
+        names(p1) = LineNames
+        p2 = dataUsed[,c(9,8)]
+        names(p2) = LineNames
+        new = rbind(p1,p2)
+        new$group = groupNames
+        
+        leafletProxy("map",data = new)%>%
+          addPolylines( lng = ~long, lat = ~lat, group = ~group, stroke = TRUE, 
+                        color = "black", weight = 4, opacity = 0.3, 
+                        popup = paste(dataUsed[,typeBy], typeBy, "from", origin, "are living in", residence, "in", year,
+                                      sep = " "),
+                        popupOptions = popupOptions(maxWidth = 1000, closeOnClick = TRUE))
+      }
+      
+      
+      
+    }
+    else{
+      #I want to sum up all of the types of refugees per country of residence. Some of the following code ideas were used from            rhelp:http://r.789695.n4.nabble.com/Changing-NA-to-0-in-selected-columns-of-a-dataframe-td4645917.html
+      
+      dataUsed <- full.spread %>% filter(Year == year)
+      dataUsed <- data.table(dataUsed) %>% select(-c(Origin, Code.x, Code.y))
+      dataUsed <- dataUsed[, lapply(.SD, sum), by=.(Residence,Year, Latitude.x, Longitude.x)]
+      
+      #Now set up the palette and radius
+      colorData <- dataUsed[[typeBy]]
+      pal <- colorBin(palette(),colorData, 5, pretty = TRUE)
+      radius <- dataUsed[[typeBy]] / max(dataUsed[[typeBy]]) *big_scale_factor
+    }
+    
+    #Add circles to the map. Depending on whether we choose 'all' or not, we will add 1 circle or various circles.
+    leafletProxy("map", data = dataUsed) %>%
+      addCircles(~Longitude.x, ~Latitude.x, radius=radius, layerId=~Residence,
+      stroke=FALSE, fillOpacity=0.7, fillColor=pal(colorData)) %>%
+      addLegend("bottomleft", pal=pal, values=colorData, title=typeBy,layerId="colorLegend")
+    
+    #Then observe for shape clicks. We use the function showPopup we created earlier to achieve this. The reason we have this observe inside the outer observe is so that we can use the dataUsed datasets, which are already filtered for us. However we only want to do this if we click 'all'. Otherwise we can click on the lines when comparing country of residence and country of origin
+    if (residence == 'all'){
+      observe({
+      leafletProxy("map") %>% clearPopups()
+      event <- input$map_shape_click
+      if (is.null(event))
+        return()
+      isolate({
+        #event$id is the country name, and the other two are the country lat and long that we have for each respective country!
+        showPopup(event$id, event$lat, event$lng, dataUsed)
+      })
+    })
+    }
+  })
+    
+
+#####SERVER CODE FOR MAP END
+    #
+    #outVars1 <- reactive({
+    #  getOrigins(full.spread, input$res1, input$num)
+    #})
+    #
+    #observe({
+    #  updateSelectInput(session, "origin1",
+    #  choices = outVars1())
+    #})
+    
+    
+
+#####SERVER CODE FOR GRAPHS
+    observeEvent(input$call, {
+      
+      #creates a new column that will tell us if the type of refugee has been checked off in the input 
+      filtered = full %>%
+        mutate(grouping = paste(full$Year, full$Type, sep = ",")) %>%
+        mutate(tru_fal = full$Type %in% input$typeof)
+      
+      #if statements that allow user to choose country of origin and country of residence
+      if(input$res1 == All & input$origin1 == All) {
+        filtered = filtered
+      }
+      
+      else if(input$res1 == All & input$origin1 != All) {
+        filtered = filtered %>%
+          mutate(country_exist = input$origin1 == full$Origin) %>%
+          filter(country_exist == TRUE)
+      }
+      
+      else if(input$res1 != All & input$origin1 == All) {
+        filtered = filtered %>%
+          mutate(country_exist = input$res1 == full$Residence) %>%
+          filter(country_exist == TRUE)
+      }
+      
+      else if(input$res1 != All & input$origin1 != All) {
+        filtered = filtered %>%
+          mutate(res_exist = input$res1 == full$Residence) %>%
+          mutate(ori_exist = input$origin1 == full$Origin) %>%
+          filter(res_exist == TRUE) %>%
+          filter(ori_exist == TRUE)
+      }
+      
+      #We use filters to create new columns that allow us to graph by year and have certain sums
+      filtered = filtered %>%
+        filter(tru_fal == TRUE) %>%
+        filter(Year >= min(input$num)) %>%
+        filter(Year <= max(input$num)) %>%
+        group_by(., grouping) %>%
+        summarise(n=sum(n)) %>%
+        mutate(year1 = as.numeric(str_remove(grouping, ",.*"))) %>%
+        mutate(group_n = str_remove(grouping, ".*,"))
+      plot.new()
+      
+      labels_to_use = labs(x = "Year", y = "Number of persons", 
+               title = paste("Refugee Trends in years", min(input$num), "-", max(input$num), sep = " "), 
+                              subtitle = paste("Moving from", input$origin1, "to", input$res1, sep = " "), color = "Type")
+      
+      output$graphs<-renderPlot({
+
+        shiny::validate (
+          need(nrow(filtered) > 0, "There is no data available for this combination of year, refugee type, and countries of residence and origin"))
+
+        ggplot(filtered, aes(x = as.factor(year1), y = n, color = group_n)) + theme_bw() +
+          geom_line(aes(group = group_n)) +
+          geom_point() +
+          labels_to_use +
+          theme(plot.title = element_text(size = 26), plot.subtitle = element_text(size = 18), axis.title = element_text(size = 14),
+                legend.text = element_text(size = 12))
+         })
+      })
+}
+
+```
+
+```{r message = FALSE, echo=FALSE}
+###The app
+
+shinyApp(ui, server, options = list(height = 500))
+```
+
+
+
+
+
